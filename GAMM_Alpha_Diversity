@@ -3,7 +3,8 @@
 #==================================================
 
 library(data.table)
-library(dplyr)
+library(dplyr)     
+library(gratia)     
 library(tidyr)
 library(vegan)
 library(mgcv)
@@ -12,13 +13,14 @@ library(glue)
 library(patchwork)
 library(viridis)
 library(broom)
+library(marginaleffects)
 
 #==================================================
 # 1) LOAD DATA
 #==================================================
 
-taxa <- fread("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/taxa_lists/COI/COI_combined_taxa_aggregated.tsv")
-meta <- fread("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/Metadata/COI_LEAP22_metadata.tsv")
+taxa <- fread("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/taxa_lists/23S/23S_combined_taxa_aggregated.tsv")
+meta <- fread("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/Metadata/23S_LEAP22_metadata.tsv")
 
 #==================================================
 # 2) PROCESS + AVERAGE REPLICATES
@@ -28,28 +30,72 @@ process_genus_data_with_reps <- function(taxa_df) {
   
   taxa_df <- as.data.table(taxa_df)
   
-  tax_cols <- c("domain","supergroup","division","subdivision",
-                "class","order","family","genus","species", 
-                "kingdom", "phylum", "marker")
+  taxa_df[, c("False_Positives", "Non-Target_Taxa") := NULL]
   
+  #Remove False positives/non-target taxa
+  taxa_df <- taxa_df[
+    is.na(Reason) | trimws(Reason) == ""
+  ]
+  
+  taxa_df[, Reason := NULL]
+  
+  #Taxonomy columns
+  tax_cols <- c(
+    "domain","supergroup","division","subdivision",
+    "class","order","family","genus","species", 
+    "kingdom", "phylum", "marker"
+  )
+  
+  #Keep Genus
   sample_cols <- setdiff(colnames(taxa_df), tax_cols)
-  taxa_df <- taxa_df[, c("genus", sample_cols), with = FALSE]
   
-  taxa_df <- taxa_df[genus != "Unknown" & !is.na(genus)]
-  taxa_df <- taxa_df[, lapply(.SD, sum), by = genus]
+  taxa_df <- taxa_df[
+    , c("genus", sample_cols), with = FALSE
+  ]
   
+  #Remove Unknown Genera
+  taxa_df <- taxa_df[
+    genus != "Unknown" & !is.na(genus)
+  ]
+  
+  #Sum by Genus
+  taxa_df <- taxa_df[
+    , lapply(.SD, sum), by = genus
+  ]
+  
+  #Matrix
   taxa_mat <- as.matrix(taxa_df[, -1])
+  
   rownames(taxa_mat) <- taxa_df$genus
   
-  taxa_rel <- sweep(taxa_mat, 2, colSums(taxa_mat), FUN = "/")
+  #Relative Abundance
+  taxa_rel <- sweep(
+    taxa_mat,
+    2,
+    colSums(taxa_mat),
+    FUN = "/"
+  )
   
+  #Average Replicates
   sample_names <- colnames(taxa_rel)
-  base_names <- gsub("_R[0-9]+$", "", sample_names)
   
-  taxa_rel_avg <- sapply(unique(base_names), function(bn) {
-    cols <- which(base_names == bn)
-    rowMeans(taxa_rel[, cols, drop = FALSE])
-  })
+  base_names <- gsub(
+    "_R[0-9]+$",
+    "",
+    sample_names
+  )
+  
+  taxa_rel_avg <- sapply(
+    unique(base_names),
+    function(bn) {
+      
+      cols <- which(base_names == bn)
+      
+      rowMeans(
+        taxa_rel[, cols, drop = FALSE]
+      )
+    }
+  )
   
   taxa_rel_avg * 100
 }
@@ -115,7 +161,7 @@ model_list <- list()
 for (hill in c("q0", "q1", "q2")) {
   
   k_day <- 5
-  k <- 3
+  k <- 4
   
   formula_text <- glue(
     "{hill} ~
@@ -133,108 +179,152 @@ for (hill in c("q0", "q1", "q2")) {
   model_list[[hill]] <- gam(as.formula(formula_text), data = div, method = "REML")
 }
 
-#==================================================
-# 6) PREDICT SURFACE (MATCH THEIR LOGIC)
-#==================================================
+results_list <- list()
 
-predict_surface_fixed <- function(fit, day_vals, data) {
+for (hill in names(model_list)) {
   
-  surface <- expand.grid(
-    Movement = seq(0, 40, by = 1),
-    NutrientP = seq(min(data$NutrientP), max(data$NutrientP), length = 100),
-    Day_num = day_vals,
-    Node = levels(data$Node)
-  )
+  mod_sum <- summary(model_list[[hill]])
   
-  # Fix factor structure
-  surface$Node <- factor(surface$Node, levels = levels(data$Node))
+  # Smooth terms
+  smooth_table <- as.data.frame(mod_sum$s.table)
+  smooth_table$Term <- rownames(smooth_table)
+  smooth_table$Model <- hill
+  smooth_table$Type <- "Smooth"
   
-  # Remove impossible downstream combos
-  surface <- surface %>%
-    filter(!(Node == "2" & Movement < 10))
+  # Parametric terms
+  param_table <- as.data.frame(mod_sum$p.table)
+  param_table$Term <- rownames(param_table)
+  param_table$Model <- hill
+  param_table$Type <- "Parametric"
   
-  # Add required random effect variable
-  surface$Mesocosm <- levels(data$Mesocosm)[1]
-  surface$Mesocosm <- factor(surface$Mesocosm, levels = levels(data$Mesocosm))
+  # Make column names consistent
+  names(param_table) <- make.names(names(param_table))
+  names(smooth_table) <- make.names(names(smooth_table))
   
-  # Predict
-  surface$pred <- predict(
-    fit,
-    newdata = surface,
-    type = "response",
-    exclude = "s(Mesocosm)"
-  )
+  combined <- bind_rows(param_table, smooth_table)
   
-  # Label nicely
-  surface$PondPosition <- c("Upstream", "Downstream")[as.numeric(surface$Node)]
-  
-  return(surface)
+  results_list[[hill]] <- combined
 }
 
+final_results <- bind_rows(results_list)
+
+# Reorder columns
+final_results <- final_results %>%
+  select(Model, Type, Term, everything())
+
+# View
+print(final_results)
+
+# Copy to clipboard
+write.table(
+  final_results,
+  pipe("pbcopy"),
+  sep = "\t",
+  row.names = FALSE
+)
+
 #==================================================
-# 7) PLOT FUNCTION
+# 6) GAMM checks
 #==================================================
 
-plot_surface_fixed <- function(surface, hill) {
-  
-  ggplot(surface, aes(x = NutrientP, y = Movement, z = pred)) +
-    geom_contour_filled() +
-    geom_contour(color = "black") +
-    facet_grid(rows = vars(PondPosition), cols = vars(Day_num)) +
-    labs(
-      fill = paste("Hill", hill),
-      x = "Nutrients",
-      y = "Connectivity"
-    ) +
-    theme_bw()
+gam.check(model_list[["q0"]])
+gam.check(model_list[["q1"]])
+gam.check(model_list[["q2"]])
+
+# Store all appraise plots in a named list
+appraise_plots <- list()
+
+for (hill in names(model_list)) {
+  appraise_plots[[hill]] <- appraise(model_list[[hill]], 
+                                     point_col  = "steelblue", 
+                                     point_alpha = 0.6)
 }
 
+# Call any individual model's full diagnostic plot
+appraise_plots[["q0"]]
+appraise_plots[["q1"]]
+appraise_plots[["q2"]]
+
+# Save them
+ggsave("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/GAMM/23S_test/23S_appraise_q0.png", appraise_plots[["q0"]], width = 10, height = 8)
+ggsave("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/GAMM/23S_test/23S_appraise_q1.png", appraise_plots[["q1"]], width = 10, height = 8)
+ggsave("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/GAMM/23S_test/23S_appraise_q2.png", appraise_plots[["q2"]], width = 10, height = 8)
+
 #==================================================
-# 8) GENERATE FINAL PLOTS
+# 7) Plot
 #==================================================
 
+div_long <- div %>%
+  pivot_longer(
+    cols = c(q0, q1, q2),
+    names_to = "Hill",
+    values_to = "Diversity"
+  ) %>%
+  mutate(
+    NutrientP_f = factor(NutrientP),
+    Movement_f  = factor(Movement),
+    Node        = factor(Node)
+  )
+
+#Plot
 plot_list <- list()
 
-for (hill in c("q0", "q1", "q2")) {
+for(h in c("q0", "q1", "q2")) {
   
-  surf <- predict_surface_fixed(
-    model_list[[hill]], 
-    day_vals = c(0, median(div$Day_num), max(div$Day_num)),
-    data = div
+  df_sub <- div_long %>%
+    filter(Hill == h)
+  
+  p <- ggplot(
+    df_sub,
+    aes(
+      x = Day_num,
+      y = Diversity,
+      group = Mesocosm,
+      color = NutrientP_f
+    )
+  ) +
+    
+    geom_line(alpha = 0.7, linewidth = 0.8) +
+    geom_point(size = 2) +
+    
+    facet_grid(
+      Node ~ Movement_f,
+      scales = "free_y"
+    ) +
+    
+    scale_x_continuous(
+      breaks = c(0, 28, 49, 73, 91)
+    ) +
+    
+    theme_bw(base_size = 14) +
+    
+    labs(
+      title = paste("Hill Diversity:", h),
+      x = "Day",
+      y = "Diversity",
+      color = "Nutrient Addition"
+    ) +
+    
+    theme(
+      strip.background = element_rect(fill = "grey90"),
+      panel.grid.minor = element_blank()
+    )
+  
+  plot_list[[h]] <- p
+  
+  # Save figure
+  ggsave(
+    filename = glue(
+      "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/GAMM/23S_test/{h}_facet_plot.png"
+    ),
+    plot = p,
+    width = 18,
+    height = 8,
+    dpi = 300
   )
-  
-  p <- plot_surface_fixed(surf, hill)
-  
-  # Store plot
-  plot_list[[hill]] <- p
-  
-  print(p)
 }
 
+#View Plots
+plot_list[["q0"]]
 plot_list[["q1"]]
 plot_list[["q2"]]
-plot_list[["q0"]]
-
-ggsave(
-  filename = paste0("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/GAMM/COI_q0_GAMM_surface.png"),
-  plot = plot_list[["q0"]],
-  width = 8,
-  height = 5,
-  dpi = 600
-)
-
-ggsave(
-  filename = paste0("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/GAMM/COI_q1_GAMM_surface.png"),
-  plot = plot_list[["q1"]],
-  width = 8,
-  height = 5,
-  dpi = 600
-)
-
-ggsave(
-  filename = paste0("/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/GAMM/COI_q2_GAMM_surface.png"),
-  plot = plot_list[["q2"]],
-  width = 8,
-  height = 5,
-  dpi = 600
-)
