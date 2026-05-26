@@ -1,0 +1,560 @@
+##################### COI vs Morphology #####################
+
+# Load libraries
+library(ggVennDiagram)
+library(readr)
+library(dplyr)
+library(vegan)
+library(ggplot2)
+library(cowplot)
+library(tidyr)
+library(stringr)
+library(purrr)
+
+############################
+# 1) LOAD FILES
+############################
+
+# COI
+df_coi <- read_tsv(
+  "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/taxa_Lists/COI/COI_zoop.tsv"
+)
+
+# Morphology
+df_morph <- read_tsv(
+  "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/taxa_Lists/fluoroprobe/Zoop_Morph_Clean1.tsv"
+)
+
+############################
+# 2) PROCESS FOR VENN
+############################
+
+taxon_col <- function(df) {
+  
+  col <- grep(
+    "taxon|family|genus",
+    names(df),
+    ignore.case = TRUE,
+    value = TRUE
+  )[1]
+  
+  unique(trimws(as.character(df[[col]])))
+}
+
+coi_taxa   <- taxon_col(df_coi)
+morph_taxa <- taxon_col(df_morph)
+
+venn_list <- list(
+  "COI" = coi_taxa,
+  "Morphology" = morph_taxa
+)
+
+venn_plot <- ggVennDiagram(
+  venn_list,
+  label_alpha = 0,
+  label = "count"
+) +
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") +
+  theme_void() +
+  theme(legend.position = "none")
+
+############################
+# 3) COLLAPSE COI REPLICATES
+############################
+
+collapse_coi_replicates <- function(df) {
+  
+  # Find taxon column
+  tax_col <- grep(
+    "taxon|family|genus",
+    names(df),
+    ignore.case = TRUE,
+    value = TRUE
+  )[1]
+  
+  taxa <- df[[tax_col]]
+  
+  df_num <- df[, !(names(df) %in% tax_col)]
+  
+  # Remove replicate suffix
+  new_names <- gsub("_R[0-9]+$", "", names(df_num))
+  
+  # Sum replicates
+  df_collapsed <- rowsum(
+    t(as.matrix(df_num)),
+    group = new_names
+  )
+  
+  df_collapsed <- as.data.frame(t(df_collapsed))
+  
+  df_final <- cbind(
+    Taxa = taxa,
+    df_collapsed
+  )
+  
+  return(df_final)
+}
+
+df_coi_collapsed <- collapse_coi_replicates(df_coi)
+
+############################
+# 3B) ALIGN TIME POINTS
+############################
+coi_sample_cols <- names(df_coi_collapsed)
+
+# Remove COI T4
+remove_coi_t4 <- grepl("_T4$", coi_sample_cols)
+
+df_coi_collapsed <- df_coi_collapsed[
+  ,
+  !remove_coi_t4
+]
+
+# Rename COI T5 -> T4
+names(df_coi_collapsed) <- gsub(
+  "_T5$",
+  "_T4",
+  names(df_coi_collapsed)
+)
+
+morph_sample_cols <- names(df_morph)
+
+# Keep taxon column
+tax_col_morph <- grep(
+  "taxon|family|genus",
+  names(df_morph),
+  ignore.case = TRUE,
+  value = TRUE
+)[1]
+
+# Remove morphology T5
+remove_morph_t5 <- grepl(
+  "_T5$",
+  morph_sample_cols
+)
+
+# Keep taxon column + non-T5 samples
+df_morph <- df_morph[
+  ,
+  names(df_morph) == tax_col_morph |
+    !remove_morph_t5
+]
+
+############################
+# 4) PREPARE DATA FOR JACCARD
+############################
+
+process_df_jaccard <- function(df) {
+  
+  # Find taxon column
+  tax_col <- grep(
+    "taxon|family|genus",
+    names(df),
+    ignore.case = TRUE,
+    value = TRUE
+  )[1]
+  
+  taxa <- df[[tax_col]]
+  
+  # Keep only numeric/sample columns
+  df_num <- df[, !(names(df) %in% tax_col)]
+  
+  # Force all columns numeric
+  df_num <- df_num %>%
+    mutate(across(everything(), as.numeric))
+  
+  # Convert to presence/absence
+  df_pa <- df_num
+  
+  df_pa[df_pa > 0] <- 1
+  df_pa[is.na(df_pa)] <- 0
+  
+  rownames(df_pa) <- taxa
+  
+  # Transpose (samples = rows)
+  df_pa <- as.data.frame(t(df_pa))
+  
+  # Ensure numeric after transpose
+  df_pa[] <- lapply(df_pa, as.numeric)
+  
+  # Remove empty samples
+  df_pa <- df_pa[rowSums(df_pa) > 0, ]
+  
+  return(df_pa)
+}
+
+df_jaccard_coi   <- process_df_jaccard(df_coi_collapsed)
+df_jaccard_morph <- process_df_jaccard(df_morph)
+
+############################
+# 5) MATCH SAMPLE LISTS
+############################
+
+coi_samples   <- rownames(df_jaccard_coi)
+morph_samples <- rownames(df_jaccard_morph)
+
+shared_samples <- intersect(coi_samples, morph_samples)
+
+removed_coi <- setdiff(coi_samples, shared_samples)
+removed_morph <- setdiff(morph_samples, shared_samples)
+
+# Print removed samples
+print(removed_coi)
+print(removed_morph)
+
+# Keep only shared samples
+df_jaccard_coi   <- df_jaccard_coi[shared_samples, ]
+df_jaccard_morph <- df_jaccard_morph[shared_samples, ]
+
+############################
+# 6) JACCARD + PCoA FUNCTION
+############################
+
+jaccard_pcoa <- function(df, label_name) {
+  
+  # Jaccard distance
+  dist_mat <- vegdist(df, method = "jaccard", binary = TRUE)
+  
+  # PCoA
+  pcoa <- cmdscale(dist_mat, k = 2, eig = TRUE)
+  
+  var_exp <- round(pcoa$eig / sum(pcoa$eig) * 100, 1)
+  
+  df_out <- as.data.frame(pcoa$points) %>%
+    rename(
+      Axis1 = V1,
+      Axis2 = V2
+    ) %>%
+    mutate(
+      SampleID = rownames(.),
+      Label = label_name,
+      Axis1_lab = paste0(
+        "Axis 1 (",
+        var_exp[1],
+        "%)"
+      ),
+      Axis2_lab = paste0(
+        "Axis 2 (",
+        var_exp[2],
+        "%)"
+      )
+    )
+  
+  return(df_out)
+}
+
+pcoa_coi <- jaccard_pcoa(
+  df_jaccard_coi,
+  "COI"
+)
+
+pcoa_morph <- jaccard_pcoa(
+  df_jaccard_morph,
+  "Morphology"
+)
+
+############################
+# 7) PLOT
+############################
+
+plot_pcoa <- function(df, title_name) {
+  
+  x_lab <- unique(df$Axis1_lab)
+  y_lab <- unique(df$Axis2_lab)
+  
+  ggplot(df, aes(x = Axis1, y = Axis2)) +
+    geom_point(size = 3) +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      panel.border = element_rect(
+        color = "black",
+        fill = NA
+      ),
+      plot.title = element_text(
+        hjust = 0.5,
+        face = "bold"
+      )
+    ) +
+    labs(
+      x = x_lab,
+      y = y_lab,
+      title = title_name
+    )
+}
+
+p1 <- plot_pcoa(
+  pcoa_coi,
+  "COI (Jaccard)"
+)
+
+p2 <- plot_pcoa(
+  pcoa_morph,
+  "Morphology (Jaccard)"
+)
+
+############################
+# 8) COMBINE PLOTS
+############################
+
+bottom_plots <- plot_grid(
+  p1,
+  p2,
+  ncol = 2
+)
+
+final_plot <- plot_grid(
+  venn_plot,
+  bottom_plots,
+  ncol = 1,
+  rel_heights = c(1, 1),
+  labels = c("A)", "B)"),
+  label_size = 16
+)
+
+final_plot
+
+############################
+# 9) SAVE FIGURE
+############################
+
+ggsave(
+  "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/Morphology/COI_vs_Morph_Jaccard.png",
+  plot = final_plot,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+############################
+# 10) LOAD METADATA
+############################
+
+metadata <- read_tsv(
+  "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/Metadata/Morphology.tsv"
+)
+
+############################
+# 11) SAMPLE METADATA
+############################
+
+sample_metadata <- metadata %>%
+  
+  # Keep only samples present in BOTH datasets
+  filter(SampleID %in% shared_samples) %>%
+  
+  select(
+    SampleID,
+    flow_rate,
+    nutrient_addition,
+    time,
+    upstream_downstream
+  ) %>%
+  
+  rename(
+    Connectivity = flow_rate,
+    Nutrient = nutrient_addition,
+    Time = time,
+    Node = upstream_downstream
+  )
+
+############################
+# 12) MANTEL TEST FUNCTION
+############################
+
+run_mantel <- function(
+    coi_df,
+    morph_df,
+    sample_ids,
+    comparison_name
+) {
+  
+  # Subset
+  coi_sub <- coi_df[sample_ids, , drop = FALSE]
+  morph_sub <- morph_df[sample_ids, , drop = FALSE]
+  
+  # Need at least 3 samples
+  if(nrow(coi_sub) < 3) {
+    
+    return(
+      data.frame(
+        Comparison = comparison_name,
+        N_samples = nrow(coi_sub),
+        Mantel_r = NA,
+        P_value = NA
+      )
+    )
+  }
+  
+  # Distance matrices
+  coi_dist <- vegdist(
+    coi_sub,
+    method = "jaccard",
+    binary = TRUE
+  )
+  
+  morph_dist <- vegdist(
+    morph_sub,
+    method = "jaccard",
+    binary = TRUE
+  )
+  
+  # Mantel
+  mantel_res <- mantel(
+    coi_dist,
+    morph_dist,
+    method = "pearson",
+    permutations = 999
+  )
+  
+  out <- data.frame(
+    Comparison = comparison_name,
+    N_samples = nrow(coi_sub),
+    Mantel_r = mantel_res$statistic,
+    P_value = mantel_res$signif
+  )
+  
+  return(out)
+}
+
+############################
+# 13) RUN ALL MANTEL TESTS
+############################
+
+mantel_results <- list()
+
+####################################
+# A) EACH TIME POINT
+####################################
+
+time_points <- unique(sample_metadata$Time)
+
+for(t in time_points) {
+  
+  samp <- sample_metadata %>%
+    filter(Time == t) %>%
+    pull(SampleID)
+  
+  mantel_results[[paste0("Time_", t)]] <-
+    run_mantel(
+      df_jaccard_coi,
+      df_jaccard_morph,
+      samp,
+      paste("Time", t)
+    )
+}
+
+####################################
+# B) ALL TIME POINTS TOGETHER
+####################################
+
+mantel_results[["All_Timepoints"]] <-
+  run_mantel(
+    df_jaccard_coi,
+    df_jaccard_morph,
+    shared_samples,
+    "All Time Points"
+  )
+
+####################################
+# C) NUTRIENT TREATMENTS
+####################################
+
+nutrient_levels <- unique(sample_metadata$Nutrient)
+
+for(n in nutrient_levels) {
+  
+  samp <- sample_metadata %>%
+    filter(Nutrient == n) %>%
+    pull(SampleID)
+  
+  mantel_results[[paste0("Nutrient_", n)]] <-
+    run_mantel(
+      df_jaccard_coi,
+      df_jaccard_morph,
+      samp,
+      paste("Nutrient", n)
+    )
+}
+
+####################################
+# D) CONNECTIVITY TREATMENTS
+####################################
+
+connectivity_levels <- unique(sample_metadata$Connectivity)
+
+for(cn in connectivity_levels) {
+  
+  samp <- sample_metadata %>%
+    filter(Connectivity == cn) %>%
+    pull(SampleID)
+  
+  mantel_results[[paste0("Connectivity_", cn)]] <-
+    run_mantel(
+      df_jaccard_coi,
+      df_jaccard_morph,
+      samp,
+      paste("Connectivity", cn)
+    )
+}
+
+####################################
+# E) UPSTREAM VS DOWNSTREAM
+####################################
+
+node_levels <- unique(sample_metadata$Node)
+
+for(nd in node_levels) {
+  
+  samp <- sample_metadata %>%
+    filter(Node == nd) %>%
+    pull(SampleID)
+  
+  mantel_results[[paste0("Node_", nd)]] <-
+    run_mantel(
+      df_jaccard_coi,
+      df_jaccard_morph,
+      samp,
+      paste("Node", nd)
+    )
+}
+
+############################
+# 14) COMBINE RESULTS
+############################
+
+mantel_results_df <- bind_rows(mantel_results)
+
+print(mantel_results_df)
+
+############################
+# 15) SAVE MANTEL RESULTS
+############################
+
+write_tsv(
+  mantel_results_df,
+  "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/Morphology/Mantel_Test_Results.tsv"
+)
+
+############################
+# 16) SAVE REMOVED SAMPLES
+############################
+
+removed_samples_df <- bind_rows(
+  
+  data.frame(
+    Dataset = "COI",
+    Removed_Sample = removed_coi
+  ),
+  
+  data.frame(
+    Dataset = "Morphology",
+    Removed_Sample = removed_morph
+  )
+)
+
+write_tsv(
+  removed_samples_df,
+  "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/Morphology/Removed_Samples.tsv"
+)
+
