@@ -1,0 +1,198 @@
+---
+title: "Supplementary Material"
+subtitle: "alpha Diversity"
+format:
+  pdf:
+    documentclass: article
+    pdf-engine: xelatex
+    mainfont: "Times New Roman"
+    fontsize: 12pt
+    toc: true
+    toc-title: "Table of Contents"
+    number-sections: false
+    geometry: margin=1in
+    header-includes:
+      - \usepackage{graphicx}
+      - \usepackage{grffile}
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#==================================================
+# LIBRARIES
+#==================================================
+
+library(readr)
+library(dplyr)
+library(stringr)
+library(kableExtra)
+
+# ============================================================
+# Paths
+# ============================================================
+
+# Folder that holds one sub-folder per taxonomic group
+base_path <- "/Users/alekseisychterz/Desktop/Work/PhD/Chapter_2/figures/alpha_diversity"
+
+# Order the taxonomic groups will appear in the document, top to bottom
+tax_groups <- c(
+  "23S_total", "23S_green_algae", "23S_cyanobacteria",
+  "18S_total", "18S_phytoplankton", "18S_green_algae",
+  "18S_micro_heterotrophs", "18S_zooplankton",
+  "COI_total", "COI_zooplankton"
+)
+
+# Which Hill numbers to include, and in what order
+hill_numbers <- c("q0", "q1", "q2")
+
+# Wording used inside sentances
+group_display <- setNames(gsub("_", " ", tax_groups), tax_groups)
+
+# Heading shown in the Table of Contents for each group
+group_heading <- c(
+  "23S_total"               = "23S \u2013 Total Community",
+  "23S_green_algae"         = "23S \u2013 Green Algae",
+  "23S_cyanobacteria"       = "23S \u2013 Cyanobacteria",
+  "18S_total"                = "18S \u2013 Total Community",
+  "18S_phytoplankton"        = "18S \u2013 Phytoplankton",
+  "18S_green_algae"          = "18S \u2013 Green Algae",
+  "18S_micro_heterotrophs"   = "18S \u2013 Micro-heterotrophs",
+  "18S_zooplankton"          = "18S \u2013 Zooplankton",
+  "COI_total"                = "COI \u2013 Total Community",
+  "COI_zooplankton"          = "COI \u2013 Zooplankton"
+)
+
+# Image width in the PDF
+fig_width <- 0.85
+
+# ============================================================
+# Create the PDF
+# ============================================================
+
+# Get the dataset name and drop duplicates
+get_dataset_name <- function(disp_name) {
+  marker <- regmatches(disp_name, regexpr("^[^ ]+", disp_name))
+  rest   <- trimws(sub("^[^ ]+", "", disp_name))
+  if (rest == "total") marker else disp_name
+}
+
+# Read the deviance table to get the deviance and round to the nearest whole number
+get_deviance <- function(group, hill) {
+  dev_path <- file.path(base_path, group, sprintf("%s_alpha_deviance_explained.tsv", group))
+  if (!file.exists(dev_path)) return(NA)
+  dev_df <- read_tsv(dev_path, show_col_types = FALSE)
+  raw <- dev_df$Deviance_explained[dev_df$Hill == hill]
+  if (length(raw) == 0) return(NA)
+  raw <- as.numeric(raw)
+  if (raw <= 1) raw <- raw * 100
+  round(raw)
+}
+
+insert_figure <- function(path, fig_num, caption) {
+  if (!file.exists(path)) {
+    cat(sprintf("\n\n> **[Missing figure file: %s]**\n\n", path))
+    return(invisible())
+  }
+  cat(sprintf(
+    "\n\n```{=latex}\n\\begin{center}\n\\includegraphics[width=%s\\linewidth]{%s}\n\\end{center}\n```\n\n",
+    fig_width, path
+  ))
+  cat(sprintf("**Figure S%d:** %s\n\n", fig_num, caption))
+}
+
+insert_table <- function(path, table_num, caption) {
+  if (!file.exists(path)) {
+    cat(sprintf("\n\n> **[Missing table file: %s]**\n\n", path))
+    return(invisible())
+  }
+  df <- read_tsv(path, show_col_types = FALSE)
+
+  # Table captions go above the table
+  cat(sprintf("\n\n**Table S%d:** %s\n\n", table_num, caption))
+
+  tbl <- kbl(
+    df,
+    align = c("r", "c", "c", "c"),
+    booktabs = TRUE,
+    linesep = ""
+  ) %>%
+    kable_styling(latex_options = c("hold_position"), font_size = 12)
+
+  print(tbl)
+}
+
+# ---- Caption text blocks ----
+fig1_suffix_full  <- "Graphs are broken up by Connectivity treatment. Time is on the x-axis while the Hill diversity is on the y-axis. Nutrient enrichment is represented by a colour gradient from dark blue (0 \u00b5g L\u207b\u00b9 phosphorus) to yellow (200 \u00b5g L\u207b\u00b9 phosphorus)."
+fig1_suffix_short <- "See Figure S1 for figure details."
+
+table_suffix_full  <- "Diversity values were log normalized prior to analysis to achieve a normal distribution. \"ti()\" denotes a tensor product interaction term, whereas \"s()\" denotes a smooth random-effect term. \"Day\" represents the number of days since the start of the experiment, \"Connectivity\" is the percentage connectivity between ponds, \"Nutrient Enrichment\" is the phosphorus and nitrogen loading applied to the upstream pond, and \"Mesocosm\" identifies each connected pond pair.Node position was included as a fixed factor as either \"Upstream\" or \"Downstream\"."
+table_suffix_short <- "See Table S1 for table details."
+
+fig2_suffix_full  <- "Nutrient Enrichment is on the x-axis while Connectivity is on the y-axis axis. The diversity is represented by a colour gradient from dark blue (low diversity) to yellow (high diversity). Upstream nodes are on the top while downstream nodes are on the bottom. Note there is no 0% connectivity modeled for downstream nodes."
+fig2_suffix_short <- "See Figure S2 for figure details."
+```
+
+```{r build-document}
+#| results: asis
+
+fig_num   <- 0
+table_num <- 0
+first_fig1_done  <- FALSE
+first_table_done <- FALSE
+first_fig2_done  <- FALSE
+
+for (group in tax_groups) {
+
+  cat(sprintf("\n\n## %s\n\n", group_heading[[group]]))
+
+  group_folder <- file.path(base_path, group)
+  disp_name    <- group_display[[group]]
+  dataset_name <- get_dataset_name(disp_name)
+
+  for (hill in hill_numbers) {
+
+    cat(sprintf("\n\n### Hill %s\n\n", hill))
+
+    dev_pct  <- get_deviance(group, hill)
+    dev_text <- if (is.na(dev_pct)) "XX" else as.character(dev_pct)
+
+    # --- Figure: alpha diversity time series ---
+    fig_num <- fig_num + 1
+    fig1_path   <- file.path(group_folder, sprintf("%s_alpha_%s.png", group, hill))
+    fig1_suffix <- if (!first_fig1_done) fig1_suffix_full else fig1_suffix_short
+    fig1_caption <- sprintf(
+      "alpha diversity (Hill %s) of %s overtime. %s",
+      hill, disp_name, fig1_suffix
+    )
+    insert_figure(fig1_path, fig_num, fig1_caption)
+    first_fig1_done <- TRUE
+
+    # --- Table: GAM summary ---
+    table_num <- table_num + 1
+    table_path   <- file.path(group_folder, sprintf("%s_alpha_%s_GAM_table.tsv", group, hill))
+    table_suffix <- if (!first_table_done) table_suffix_full else table_suffix_short
+    table_caption <- sprintf(
+      "Summary of the generalized additive mixed model (GAMM) fitted to the alpha diversity (Hill %s) of the total %s metabarcoding dataset (%s%% null variance explained). %s",
+      hill, dataset_name, dev_text, table_suffix
+    )
+    insert_table(table_path, table_num, table_caption)
+    first_table_done <- TRUE
+
+    # --- Figure: GAM prediction surface ---
+    fig_num <- fig_num + 1
+    fig2_path   <- file.path(group_folder, sprintf("%s_surface_plot.png", hill))
+    fig2_suffix <- if (!first_fig2_done) fig2_suffix_full else fig2_suffix_short
+    fig2_caption <- sprintf(
+      "Prediction graph created from generalized additive mixed model (GAMM) fitted to the alpha diversity (Hill %s) of the square rooted total %s metabarcoding dataset (%s%% null variance explained). %s",
+      hill, dataset_name, dev_text, fig2_suffix
+    )
+    insert_figure(fig2_path, fig_num, fig2_caption)
+    first_fig2_done <- TRUE
+  }
+
+  cat("\n\n{{< pagebreak >}}\n\n")
+}
+```
